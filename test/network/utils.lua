@@ -1,20 +1,23 @@
 local network = require "network"
+local memory = require "memory"
 
-local tests = {
-	IsWindows = os.getenv("PATHEXT")~=nil,
-	FreePort = 43210,
-	UsedPort = 54321,
-	DeniedPort = 1,
-	LocalHost = "127.0.0.1",
-	LocalPort = 43212,
-	RemoteTCP = {host="www.google.com",port=80},
-	OtherTCP = {host="www.google.com.br",port=80},
-	RemoteUDP = {host="www.google.com",port=80},
-}
+local tests = require "test.utils"
+
+do
+	tests.IsWindows = os.getenv("PATHEXT")~=nil
+	tests.LocalHost = "127.0.0.1"
+	tests.FreeAddress = network.address("ipv4", tests.LocalHost, 43210)
+	tests.UsedAddress = network.address("ipv4", tests.LocalHost, 54321)
+	tests.DeniedAddress = network.address("ipv4", tests.LocalHost, 1)
+	tests.LocalAddress = network.address("ipv4", tests.LocalHost, 43212)
+	tests.RemoteTCP = network.address("ipv4", "8.8.8.8", 53)
+	tests.OtherTCP = network.address("ipv4", "8.8.4.4", 53)
+	tests.RemoteUDP = tests.RemoteTCP
+end
 
 do
 	local socket = assert(network.socket("listen"))
-	local res, errmsg = socket:bind("*", tests.UsedPort)
+	local res, errmsg = socket:bind(tests.UsedAddress)
 	assert(res == true or errmsg == "address used")
 	tests.BindedSocket = socket -- avoid garbage collection
 end
@@ -44,34 +47,21 @@ do
 			local results = table.pack(func(...))
 			local res, errmsg = results[1], results[2]
 			if res ~= nil or errmsg ~= "unfulfilled" then
-				if unfulfilled then assert(i > 1) end
+				if unfulfilled then assert(res == nil or i > 1) end
 				return table.unpack(results, 1, results.n)
 			end
 			time.sleep(.1)
 		end
-		error("non blocked call took more than "..timeout.." to complete!")
+		error("non blocked call took more than 1 second to complete!")
 	end
 end
 
 do
-	function tests.testerror(expected, func, ...)
-		local ok, errmsg = pcall(func, ...)
-		assert(not ok)
-		assert(errmsg == expected, errmsg)
-	end
-end
-
-do
-	function tests.testerrmsg(expected, res, errmsg)
-		assert(res == nil)
-		assert(errmsg == expected)
-	end
-end
-
-do
-	function tests.testcreatesocket(kind)
-		local socket = network.socket(kind)
+	function tests.testcreatesocket(kind, domain)
+		local socket = assert(network.socket(kind, domain))
 		assert(type(socket) == "userdata")
+		assert(socket.type == kind)
+		assert(socket:getdomain() == domain or "ipv4")
 		assert(string.match(tostring(socket), "^socket %(.-%)$"))
 		return socket
 	end
@@ -84,7 +74,7 @@ do
 		dontroute = false,
 		nodelay = false,
 		keepalive = false,
-		linger = 0,
+		linger = 0, -- actually is 'nil'
 		broadcast = false,
 	}
 	local changed = {
@@ -99,7 +89,7 @@ do
 			linger = true,
 			broadcast = true,
 		},
-		connection = {
+		stream = {
 			broadcast = true,
 		},
 		datagram = {
@@ -108,20 +98,7 @@ do
 			linger = true,
 		},
 	}
-	local unsupported = {
-		listen = {},
-		connection = {
-			reuseaddr = not tests.IsWindows,
-			dontroute = not tests.IsWindows,
-			nodelay = not tests.IsWindows,
-			keepalive = not tests.IsWindows,
-			linger = not tests.IsWindows,
-		},
-		datagram = {},
-	}
---print(kind..":getoption("..name..") == ",socket:getoption(name))
---print(refused, kind..":setoption("..name..", "..tostring(changed[default])..") == ",socket:setoption(name, changed[default]))
-	function tests.testoptions(socket, kind, refused)
+	function tests.testoptions(socket, kind)
 		local disallowed = disallowed[kind]
 		for name, default in pairs(options) do
 			if disallowed[name] then
@@ -130,13 +107,22 @@ do
 				local errmsg = "bad argument #2 to '?' (invalid option '"..name.."')"
 				tests.testerror(errmsg, socket.setoption, socket, name, changed[default])
 			else
-				assert(socket:getoption(name) == default)
-				if refused and unsupported[kind][name] then
-					tests.testerrmsg("unsupported", socket:setoption(name, changed[default]))
+				if name == "linger" then
+					assert(socket:getoption(name) == nil)
+					assert(socket:setoption(name, 0) == true)
+					assert(socket:getoption(name) == 0)
+					assert(socket:setoption(name, 10) == true)
+					assert(socket:getoption(name) == 10)
+					assert(socket:setoption(name, nil) == true)
+					local errmsg = "bad argument #3 to '?' (number expected, got boolean)"
+					tests.testerror(errmsg, socket.setoption, socket, name, false)
+					assert(socket:getoption(name) == nil)
 				else
+					assert(socket:getoption(name) == default)
 					assert(socket:setoption(name, changed[default]) == true)
 					assert(socket:getoption(name) == changed[default])
 					assert(socket:setoption(name, default) == true)
+					assert(socket:getoption(name) == default)
 				end
 			end
 		end
@@ -153,6 +139,13 @@ do
 			assert(errmsg == "attempt to use a closed socket")
 		end
 	end
+end
+
+function tests.testreceive(socket, expected, ...)
+	local size = #expected
+	local buf = memory.create(size)
+	assert(socket:receive(buf, 1, size, ...) == size)
+	assert(memory.diff(buf, expected) == nil)
 end
 
 return tests

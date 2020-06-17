@@ -1,0 +1,23 @@
+local function runtest(path)
+	io.write(path, " ... ")
+	io.flush()
+	dofile("test/"..path..".lua")
+	print("done")
+end
+
+runtest("process/status")
+runtest("process/create")
+runtest("network/address")
+runtest("network/resolve")
+runtest("network/getname")
+runtest("network/socket")
+runtest("network/domain")
+runtest("network/stream")
+runtest("network/datagram")
+runtest("network/connection")
+runtest("network/filesock")
+runtest("event/watcher")
+runtest("event/network")
+runtest("event/process")
+
+print("OK")

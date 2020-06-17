@@ -4,14 +4,12 @@
 
 #include <winsock.h>
 
-#define LOSKI_SOCKETSTRING "%d"
-
-typedef void loski_NetDriver;
-typedef struct loski_Socket {
+typedef void losi_NetDriver;
+typedef struct losi_Socket {
 	SOCKET id;
 	int blocking;
-} loski_Socket;
-typedef struct sockaddr loski_Address;
+} losi_Socket;
+typedef struct sockaddr losi_Address;
 
 #include "netlibapi.h"
 

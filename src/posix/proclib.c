@@ -1,10 +1,14 @@
-#include "proclib.h"
-#include "proctab.h"
+#include "luaosi/proclib.h"
+#include "luaosi/procmgr.h"
 
-/* See: http://www.steve.org.uk/Reference/Unix/faq_2.html */
+/*
+ * See:
+ * http://www.steve.org.uk/Reference/Unix/faq_2.html
+ * http://www.linuxjournal.com/article/2121?page=0,1
+ */
 
-#include <stdlib.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <string.h>
 #include <limits.h>
 #include <errno.h>
@@ -12,27 +16,70 @@
 #include <sys/wait.h>
 #include <lauxlib.h>
 
-#define TABLE_INITSZ 4
-#define ERRNO_NO_EXIT_VALUE (-1)
 
-static volatile char hastable = 0;
-static loski_ProcTable table;
-static struct sigaction chldsig_action;
-static sigset_t chldsig_mask;
-
-
-static int stdfile(int stdfd, FILE* file)
+LOSIDRV_API losi_ErrorCode losiP_initdrv (losi_ProcDriver *drv)
 {
-	int fd = fileno(file);
-	if (fd != stdfd) {
-		int res = dup2(fd, stdfd);
-		if (res != fd) return -1;
-		if (fd > 2 && fclose(file) == EOF) return -1;
-	}
-	return 0;
+	losiP_initprocmgr(NULL, NULL);
+	return LOSI_ERRNONE;
 }
 
-static int execvep(const char *file, char *const argv[], char *const envp[])
+LOSIDRV_API void losiP_freedrv (losi_ProcDriver *drv)
+{
+	/* nothing to do */
+}
+
+#define sortvalues(A,B,T)	if (A>B) { T=A; A=B; B=T; }
+#define closerange(A,B,T)	for (T=A+1; T<B; ++T) close(T)
+
+static void closefds(int fd1, int fd2, int fd3, int lim)
+{
+	int i = -1;
+	sortvalues(fd1, fd2, i);
+	sortvalues(fd2, fd3, i);
+	sortvalues(fd1, fd2, i);
+	closerange( 2 , fd1, i);
+	closerange(fd1, fd2, i);
+	closerange(fd2, fd3, i);
+	closerange(fd3, lim, i);
+}
+
+#define STDIN_FD	0
+#define STDOUT_FD	1
+#define STDERR_FD	2
+
+static int setupstdfd(int ifd, int ofd, int efd)
+{
+	if (ifd != STDIN_FD) {
+		/* backup stdin */
+		if (ofd == STDIN_FD || efd == STDIN_FD) {
+			int tfd = dup(STDIN_FD);
+			if (tfd == -1) return 0;
+			if (ofd == STDIN_FD) ofd = tfd;
+			if (efd == STDIN_FD) efd = tfd;
+		}
+		/* replace stdin */
+		if (dup2(ifd, STDIN_FD) != STDIN_FD) return 0;
+	}
+	if (ofd != STDOUT_FD) {
+		/* backup stdout */
+		if (efd == STDOUT_FD) {
+			efd = dup(STDOUT_FD);
+			if (efd == -1) return 0;
+		}
+		/* replace stdin */
+		if (dup2(ofd, STDOUT_FD) != STDOUT_FD) return 0;
+	}
+	if ((efd != STDERR_FD) && (dup2(efd, STDERR_FD) != STDERR_FD)) return 0;
+	if (ifd > 2) if (close(ifd)) return 0;
+	if (ofd > 2) if (close(ofd)) return 0;
+	if (efd > 2) if (close(efd)) return 0;
+	return 1;
+}
+
+static int execvep(const char *file,
+                   char *const argv[],
+                   char *const envp[],
+                   char *path)
 {
 	if (!strchr(file, '/')) {
 		const char *prefix = getenv("PATH");
@@ -40,7 +87,6 @@ static int execvep(const char *file, char *const argv[], char *const envp[])
 		size_t namelen = strlen(file);
 		while(prefix && *prefix != '\0')
 		{
-			char path[PATH_MAX];
 			const char* pfxend = strchr(prefix, ':');
 			size_t pfxlen = pfxend ? (pfxend-prefix) : strlen(prefix);
 			
@@ -64,277 +110,266 @@ static int execvep(const char *file, char *const argv[], char *const envp[])
 	return execve(file, argv, envp);
 }
 
-static void chldsig_handler(int signo)
+static int resetinheritableprops ()
 {
-	pid_t pid;
-	int status;
-	while (1) {
-		pid = waitpid(-1, &status, WNOHANG);
-		if (pid < 0) {
-			if (errno != EINTR) break;
-		} else if (pid == 0) {
-			break; /* process information not available anymore */
-		} else if (hastable) {
-			loski_Process *proc = loski_proctabget(&table, pid);
-			if (proc) {
-				proc->pid = 0;
-				proc->status = status;
-			}
-		}
-	}
+	// TODO:
+	return 1;
 }
 
-static void blockchldsig()
+
+LOSIDRV_API int losiP_checkargs (losi_ProcDriver *drv,
+                                 losi_ProcArgInfo *info,
+                                 losi_ProcArgFunc getter,
+                                 void *data, int count,
+                                 size_t *size)
 {
-	if (!loski_proctabisempty(&table)) {
-		sigprocmask(SIG_BLOCK, &chldsig_mask, NULL);
-	}
+	*size = (count+1)*sizeof(const char *); /* args + NULL */
+	return 0;
 }
 
-static void unblockchldsig()
+LOSIDRV_API void losiP_initargs (losi_ProcDriver *drv,
+                                 losi_ProcArgInfo *info,
+                                 losi_ProcArgFunc getter,
+                                 void *data, int count,
+                                 void *args, size_t size)
 {
-	void (*handler)(int);
-	if (loski_proctabisempty(&table)) {
-		handler = SIG_DFL;
-	} else {
-		handler = chldsig_handler;
-	}
-	if (handler != chldsig_action.sa_handler) {
-		chldsig_action.sa_handler = handler;
-		sigaction(SIGCHLD, &chldsig_action, NULL);
-		if (handler == SIG_DFL) {
-			sigprocmask(SIG_UNBLOCK, &chldsig_mask, NULL);
-		}
-	} else if (handler == chldsig_handler) {
-		sigprocmask(SIG_UNBLOCK, &chldsig_mask, NULL);
-	}
-}
-
-LOSKIDRV_API void loski_proc_checkargvals(loski_ProcDriver *drv,
-                                          loski_ProcArgInfo *info,
-                                          loski_ProcArgFunc getarg,
-                                          lua_State *L,
-                                          size_t argc,
-                                          size_t *size)
-{
+	const char **argv = (const char **)args;
 	int i;
-	for (i = 0; i < argc; ++i) getarg(L, i); /* 'getarg' checks args */
-	*size = (argc+1)*sizeof(const char *); /* args + NULL */
+	for (i = 0; i < count; ++i) argv[i] = getter(data, i);
+	argv[count] = NULL;
 }
 
-LOSKIDRV_API void loski_proc_toargvals(loski_ProcDriver *drv,
-                                       loski_ProcArgInfo *info,
-                                       loski_ProcArgFunc getarg,
-                                       lua_State *L,
-                                       size_t argc,
-                                       void *argvals,
-                                       size_t argsize)
-{
-	const char **argv = (const char **)argvals;
-	int i;
-	for (i = 0; i < argc; ++i) argv[i] = getarg(L, i);
-	argv[argc] = NULL;
-}
-
-LOSKIDRV_API void loski_proc_checkenvlist(loski_ProcDriver *drv,
-                                          loski_ProcEnvInfo *count,
-                                          lua_State *L,
-                                          int index,
-                                          size_t *size)
+LOSIDRV_API int losiP_checkenv (losi_ProcDriver *drv,
+                                losi_ProcEnvInfo *count,
+                                losi_ProcEnvFunc getter,
+                                void *data,
+                                size_t *size)
 {
 	size_t chars = 0;
 	*count = 0;
-	lua_pushnil(L);  /* first key */
-	while (lua_next(L, index) != 0) {
-		if (lua_isstring(L, -2)) {
-			const char *name = lua_tostring(L, -2);
-			while (*name) {
-				if (*name == '=') luaL_argerror(L, 1,
-					"environment variable names containing '=' are not allowed");
-				chars++;
-				name++;
-			}
-			luaL_argcheck(L, 1, !lua_isstring(L, -1),
-				"value of environment variables must be strings");
-			chars += strlen(lua_tostring(L, -1));
-			(*count)++;
-		}
-		lua_pop(L, 1);
+	const char *name, *value; 
+	while ((value = getter(data, &name))) {
+		for (; *name; ++name, ++chars) if (*name == '=') return LOSI_ERRINVALID;
+		chars += strlen(value);
+		++(*count);
 	}
 	*size = ((*count)+1)*(sizeof(char *)) /* the 'envl' array + NULL */
 	      + (chars+2*(*count))*(sizeof(char)); /* #key + #value + '=' + '\0' */
+	return 0;
 }
 
-LOSKIDRV_API void loski_proc_toenvlist(loski_ProcDriver *drv,
-                                       loski_ProcEnvInfo *count,
-                                       lua_State *L,
-                                       int index,
-                                       void *envlist,
-                                       size_t envsize)
+LOSIDRV_API void losiP_initenv (losi_ProcDriver *drv,
+                                losi_ProcEnvInfo *count,
+                                losi_ProcEnvFunc getter,
+                                void *data,
+                                void *envlist, size_t size)
 {
 	char **envl = (char **)envlist;
 	char *str = (char *)(envlist + ((*count)+1)*sizeof(char *));
 	int i = 0;
-	lua_pushnil(L);  /* first key */
-	while (lua_next(L, index) != 0) {
-		if (lua_isstring(L, -2)) {
-			const char *c = lua_tostring(L, -2);
-			envl[i++] = str; /* put string in 'envl' array */
-			while (*c) *str++ = *c++; /* copy key to string, excluding '\0' */
-			*str++ = '=';
-			c = lua_tostring(L, -1);
-			while ((*str++ = *c++)); /* copy value to string, including '\0' */
-		}
-		lua_pop(L, 1); /* pop value */
+	const char *c, *value; 
+	while ((value = getter(data, &c))) {
+		envl[i++] = str; /* put string in 'envl' array */
+		while (*c) *str++ = *c++; /* copy key to string, excluding '\0' */
+		*str++ = '=';
+		c = value;
+		while ((*str++ = *c++)); /* copy value to string, including '\0' */
 	}
 	envl[i] = NULL; /* put NULL to mark the end of 'envl' array */
 }
 
-/* TODO: let application provide a memory allocation function */
-LOSKIDRV_API int loski_openprocesses(loski_ProcDriver *drv)
+LOSIDRV_API losi_ErrorCode losiP_initproc (losi_ProcDriver *drv,
+                                           losi_Process *proc,
+                                           const char *binpath,
+                                           const char *runpath,
+                                           void *argv,
+                                           void *envl,
+                                           losi_ProcStream *stdin,
+                                           losi_ProcStream *stdout,
+                                           losi_ProcStream *stderr)
 {
-	if (!hastable) {
-		/* setup signal action */
-		chldsig_action.sa_handler = SIG_DFL;
-		sigemptyset(&chldsig_action.sa_mask);
-		chldsig_action.sa_flags = 0;
-		/* setup signal block mask */
-		sigemptyset(&chldsig_mask);
-		sigaddset(&chldsig_mask, SIGCHLD);
-		if (loski_proctabinit(&table, TABLE_INITSZ) == 0) {
-			hastable = 1;
-			return 0;
+	int err;
+	char pathbuf[PATH_MAX];
+	int ifd = stdin ? *stdin : 0;
+	int ofd = stdout ? *stdout : 1;
+	int efd = stderr ? *stderr : 2;
+	int mfd = sysconf(_SC_OPEN_MAX);
+	if (ifd==-1 || ofd==-1 || efd==-1 || mfd==-1) return LOSI_ERRUNEXPECTED;
+	losiP_lockprocmgr();
+	err = !losiP_incprocmgr();
+	losiP_unlockprocmgr();
+	if (err) return LOSI_ERRNOMEMORY;
+	if (runpath) {
+		if (getcwd(pathbuf, PATH_MAX) == NULL) {
+			switch (errno) {
+				case EINVAL:
+				case ERANGE:
+				case EACCES:
+				case ENOMEM: return LOSI_ERRUNEXPECTED;
+			}
+			return LOSI_ERRUNSPECIFIED;
+		}
+		if (chdir(runpath)) {
+			switch (errno) {
+				case EACCES: return LOSI_ERRDENIED;
+				case ELOOP:
+				case ENAMETOOLONG: return LOSI_ERRTOOMUCH;
+				case ENOENT:
+				case ENOTDIR: return LOSI_ERRINVALID;
+			}
+			return LOSI_ERRUNSPECIFIED;
 		}
 	}
-	return -1;
-}
-
-LOSKIDRV_API int loski_closeprocesses(loski_ProcDriver *drv)
-{
-	if (hastable) {
-		blockchldsig();
-		hastable = 0;
-		loski_proctabclose(&table);
-		unblockchldsig();
-		return 0;
-	}
-	return -1;
-}
-
-LOSKIDRV_API int loski_processerror(int error, lua_State *L)
-{
-	switch (error) {
-		case ERRNO_NO_EXIT_VALUE: lua_pushliteral(L, "process did not exit"); break;
-		default: lua_pushstring(L, strerror(error)); break;
-	}
-	return 0;
-}
-
-LOSKIDRV_API int loski_createprocess(loski_ProcDriver *drv,
-                                     loski_Process *proc,
-                                     const char *binpath,
-                                     const char *runpath,
-                                     void *argvals,
-                                     void *envlist,
-                                     FILE *stdin,
-                                     FILE *stdout,
-                                     FILE *stderr)
-{
-	int res;
-	blockchldsig();
+	losiP_lockprocmgr();
 	proc->pid = fork();
 	proc->status = 0;
-	if (proc->pid == -1) res = errno;
-	else if (proc->pid > 0) {
-		loski_proctabput(&table, proc);
-		res = 0;
+	proc->pipe[0] = -1;
+	proc->pipe[1] = -1;
+	proc->piperefs = 0;
+	if (proc->pid == -1) {
+		switch (errno) {
+			case EAGAIN: err = LOSI_ERRNORESOURCES; break;
+			case ENOMEM: err = LOSI_ERRNOMEMORY; break;
+			default: err = LOSI_ERRUNSPECIFIED;
+		}
+	} else if (proc->pid > 0) {
+		losiP_putprocmgr(proc);
+		err = 0;
 	} else {
 		/* child process */
-		int res = 0;
-		if (res == 0 && stdin  ) res = stdfile(0, stdin);
-		if (res == 0 && stdout ) res = stdfile(1, stdout);
-		if (res == 0 && stderr ) res = stdfile(2, stderr);
-		if (res == 0 && runpath) res = chdir(runpath);
-		if (res == 0) {
-			int max = sysconf(_SC_OPEN_MAX);
-			if (max > 0) {
-				int i;
-				for (i=3; i<max; ++i) close(i); /* close all open file descriptors */
-				if (envlist) execvep(binpath, (char *const *)argvals, (char *const *)envlist);
-				else execvp(binpath, (char *const *)argvals);
+		losiP_unlockprocmgr();
+		closefds(ifd, ofd, efd, mfd);
+		if (setupstdfd(ifd, ofd, efd) && resetinheritableprops()) {
+			if (!envl) execvp(binpath, (char *const *)argv);
+			else execvep(binpath, (char *const *)argv, (char *const *)envl, pathbuf);
+		}
+		_exit(0xff);
+		err = LOSI_ERRUNEXPECTED;  /* avoid warning */
+	}
+	losiP_unlockprocmgr();
+	if (runpath && chdir(pathbuf)) err = LOSI_ERRUNEXPECTED;
+	return err;
+}
+
+LOSIDRV_API losi_ErrorCode losiP_getprocstat (losi_ProcDriver *drv,
+                                              losi_Process *proc,
+                                              losi_ProcStatus *status)
+{
+	int err = 0;
+	losiP_lockprocmgr();
+	if (proc->pid != 0) {
+		pid_t waitres;
+		waitres = waitpid(proc->pid, &proc->status, WNOHANG|WCONTINUED|WUNTRACED);
+		if (waitres != -1) {
+			if (proc->status == 0) {
+				*status = (waitres == proc->pid) ? LOSI_PROCSTAT_DEAD
+				                                 : LOSI_PROCSTAT_RUNNING;
+			} else if (WIFEXITED(proc->status)) {
+				*status = LOSI_PROCSTAT_DEAD;
+			} else if (WIFSIGNALED(proc->status)) {
+				*status = LOSI_PROCSTAT_DEAD;
+			} else if (WIFSTOPPED(proc->status)) {
+				*status = LOSI_PROCSTAT_SUSPENDED;
+			} else if (WIFCONTINUED(proc->status)) {
+				*status = LOSI_PROCSTAT_RUNNING;
+			}
+			if (*status == LOSI_PROCSTAT_DEAD) {
+				losiP_delprocmgr(proc);
+				proc->pid = 0;
 			}
 		}
-		_exit(errno);
-		res = errno; /* avoid warning */
+		else switch (errno) {
+			case EINTR:
+			case ECHILD:
+			case EINVAL: err = LOSI_ERRUNEXPECTED; break;
+			default: err = LOSI_ERRUNSPECIFIED;
+		}
 	}
-	unblockchldsig();
-	return res;
+	else *status = LOSI_PROCSTAT_DEAD;
+	losiP_unlockprocmgr();
+	return err;
 }
 
-LOSKIDRV_API int loski_processstatus(loski_ProcDriver *drv,
-                                     loski_Process *proc,
-                                     loski_ProcStatus *status)
+LOSIDRV_API losi_ErrorCode losiP_getprocexit (losi_ProcDriver *drv,
+                                              losi_Process *proc,
+                                              int *code)
 {
-	int res = 0;
-	blockchldsig();
-	if (proc->pid != 0) {
-		do {
-			pid_t waitres = waitpid(proc->pid, &proc->status, WNOHANG|WCONTINUED|WUNTRACED);
-			if (waitres != -1) {
-				if (proc->status == 0) {
-					*status = (waitres == proc->pid) ? LOSKI_DEADPROC : LOSKI_RUNNINGPROC;
-				} else if (WIFEXITED(proc->status)) {
-					*status = LOSKI_DEADPROC;
-				} else if (WIFSIGNALED(proc->status)) {
-					*status = LOSKI_DEADPROC;
-				} else if (WIFSTOPPED(proc->status)) {
-					*status = LOSKI_SUSPENDEDPROC;
-				} else if (WIFCONTINUED(proc->status)) {
-					*status = LOSKI_RUNNINGPROC;
-				}
-			}
-			else res = errno;
-		} while (res == EINTR);
+	if (proc->pid == 0) {
+		if (WIFEXITED(proc->status)) {
+			*code = WEXITSTATUS(proc->status);
+			return LOSI_ERRNONE;
+		} else if (WIFSIGNALED(proc->status)) {
+			return LOSI_ERRABORTED;
+		}
 	}
-	else *status = LOSKI_DEADPROC;
-	if (res == 0 && *status == LOSKI_DEADPROC) {
-		loski_proctabdel(&table, proc);
+	return LOSI_ERRUNFULFILLED;
+}
+
+LOSIDRV_API losi_ErrorCode losiP_killproc (losi_ProcDriver *drv,
+                                           losi_Process *proc)
+{
+	losi_ErrorCode err = LOSI_ERRNONE;
+	losiP_lockprocmgr();
+	if (proc->pid != 0) if (kill(proc->pid, SIGKILL) == -1) switch (errno) {
+		case EPERM: err = LOSI_ERRDENIED; break;
+		case ESRCH:
+		case EINVAL: err = LOSI_ERRUNEXPECTED; break;
+		default: err = LOSI_ERRUNSPECIFIED; break;
+	}
+	losiP_unlockprocmgr();
+	return err;
+}
+
+LOSIDRV_API void losiP_freeproc (losi_ProcDriver *drv,
+                                 losi_Process *proc)
+{
+	losiP_lockprocmgr();
+	if (proc->pid != 0) {
+		losiP_delprocmgr(proc);
 		proc->pid = 0;
 	}
-	unblockchldsig();
-	return res;
+	losiP_unlockprocmgr();
 }
 
-LOSKIDRV_API int loski_processexitval(loski_ProcDriver *drv,
-                                      loski_Process *proc,
-                                      int *code)
+LOSIDRV_API int losiP_getluafileprocstrm (void *udata, losi_ProcStream *fd)
 {
-	if ( (proc->pid == 0) && WIFEXITED(proc->status) ) {
-		*code = WEXITSTATUS(proc->status);
-		return 0;
-	}
-	return ERRNO_NO_EXIT_VALUE;
+	FILE **fp = (FILE **)udata;
+	if (*fp == NULL) return 0;
+	*fd = fileno(*fp);
+	return 1;
 }
 
-LOSKIDRV_API int loski_killprocess(loski_ProcDriver *drv,
-                                   loski_Process *proc)
+LOSIDRV_API losi_ErrorCode losiP_getprocevtsrc (void *udata, int newref,
+                                                losi_EventSource *src,
+                                                losi_EventFlags evtflags)
 {
-	if (proc->pid != 0) {
-		int res = kill(proc->pid, SIGKILL);
-		if (res == -1) return errno;
+	losi_ErrorCode err = LOSI_ERRNONE;
+	losi_Process *proc = (losi_Process *)udata;
+	if (evtflags & LOSI_EVTFLAGS_OUTPUT) return LOSI_ERRUNSUPPORTED;
+	losiP_lockprocmgr();
+	if (proc->pipe[1] != -1 || (proc->pid && newref && pipe(proc->pipe) == 0)) {
+		if (newref) ++(proc->piperefs);
+		*src = proc->pipe[1];
+	} else {
+		err = LOSI_ERRCLOSED;
 	}
-	return 0;
+	losiP_unlockprocmgr();
+	return err;
 }
 
-LOSKIDRV_API int loski_discardprocess(loski_ProcDriver *drv,
-                                      loski_Process *proc)
+#define closefd(F)	while (close(F) != 0 && errno == EINTR)
+
+LOSIDRV_API void losiP_freeprocevtsrc (void *udata)
 {
-	blockchldsig();
-	if (proc->pid >= 0) {
-		loski_proctabdel(&table, proc);
-		proc->pid = -1;
-		proc->status = 0;
+	losi_Process *proc = (losi_Process *)udata;
+	if (--(proc->piperefs) == 0) {
+		losiP_lockprocmgr();
+		if (proc->pipe[0] != -1) {
+			closefd(proc->pipe[0]);
+			proc->pipe[0] = -1;
+		}
+		losiP_unlockprocmgr();
+		closefd(proc->pipe[1]);
+		proc->pipe[1] = -1;
 	}
-	unblockchldsig();
-	return 0;
 }

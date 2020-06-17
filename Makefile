@@ -1,5 +1,5 @@
-# Makefile for installing Lua
-# See doc/readme.html for installation and customization instructions.
+# Makefile for installing LOSI
+# See README.md for installation and customization instructions.
 
 include config
 
@@ -33,9 +33,9 @@ RM= rm -f
 PLATS= aix ansi bsd freebsd generic linux macosx mingw posix solaris
 
 # What to install.
-TO_INC= luaoski.h
+TO_INC= luaosi.h
 TO_LIB= $(LIB_A)
-TO_CLIB= $(TIM_M) $(PRC_M) $(NET_M) $(FLS_M)
+TO_CLIB= $(TIM_M) $(PRC_M) $(NET_M)
 
 # Targets start here.
 all:	$(PLAT)
