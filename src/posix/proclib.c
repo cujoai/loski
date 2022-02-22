@@ -25,7 +25,7 @@ LOSIDRV_API losi_ErrorCode losiP_initdrv (losi_ProcDriver *drv)
 
 LOSIDRV_API void losiP_freedrv (losi_ProcDriver *drv)
 {
-	/* nothing to do */
+	losiP_freeprocmgr();
 }
 
 #define sortvalues(A,B,T)	if (A>B) { T=A; A=B; B=T; }

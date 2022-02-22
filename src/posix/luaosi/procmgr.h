@@ -6,6 +6,8 @@
 
 int losiP_initprocmgr (losi_Alloc allocf, void *allocud);
 
+void losiP_freeprocmgr (void);
+
 void losiP_lockprocmgr ();
 
 void losiP_unlockprocmgr ();

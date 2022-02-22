@@ -89,6 +89,12 @@ int losiP_initprocmgr (losi_Alloc allocf, void *allocud)
 	return 0;
 }
 
+void losiP_freeprocmgr (void)
+{
+	if (initialized && proctab.table != proctab.mintab)
+		proctab.allocf(proctab.allocud, proctab.table, proctab.capacity * sizeof *proctab.table, 0);
+}
+
 void losiP_lockprocmgr ()
 {
 	if (!losiP_emptyproctab(&proctab))
