@@ -90,14 +90,16 @@ void losiP_lockprocmgr ()
 
 void losiP_unlockprocmgr ()
 {
-	void (*handler)(int);
-	if (losiP_emptyproctab(&proctab)) handler = SIG_DFL;
-	else handler = childhandler;
-	if (handler != childact.sa_handler) {
-		childact.sa_handler = handler;
+	int use_dfl = losiP_emptyproctab(&proctab);
+	int have_dfl = childact.sa_handler == SIG_DFL;
+	if (use_dfl != have_dfl) {
+		if (use_dfl)
+			childact.sa_handler = SIG_DFL;
+		else
+			childact.sa_handler = childhandler;
 		sigaction(SIGCHLD, &childact, NULL);
-		if (handler == SIG_DFL) sigprocmask(SIG_UNBLOCK, &childmsk, NULL);
-	} else if (handler == childhandler) {
+		if (use_dfl) sigprocmask(SIG_UNBLOCK, &childmsk, NULL);
+	} else if (!use_dfl) {
 		sigprocmask(SIG_UNBLOCK, &childmsk, NULL);
 	}
 }
