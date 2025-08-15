@@ -32,25 +32,34 @@ static void childhandler (int signo)
 {
 	pid_t pid;
 	int status;
-	while (1) {
-		pid = waitpid(-1, &status, WNOHANG);
-		if (pid < 0) {
-			if (errno != EINTR) break;
-		} else if (pid == 0) {
-			break; /* process information not available anymore */
-		} else if (initialized) {
-			losi_Process *proc = losiP_findproctab(&proctab, pid);
-			if (proc) {
-				losiP_delproctab(&proctab, proc);
-				proc->pid = 0;
-				proc->status = status;
-				if (proc->pipe[0] != -1) {
-					whileintr(write(proc->pipe[0], &proc, sizeof(proc)));
-					whileintr(close(proc->pipe[0]));
+
+	int any_changed;
+	do {
+		if (!initialized)
+			break;
+
+		any_changed = 0;
+		for (size_t i = 0; i < proctab.capacity; ++i) {
+			losi_Process *proc = proctab.table[i];
+			while (proc) {
+				losi_Process *next = proc->next;
+				do {
+					pid = waitpid(proc->pid, &status, WNOHANG);
+				} while (pid < 0 && errno == EINTR);
+				if (pid > 0) {
+					any_changed = 1;
+					losiP_delproctab(&proctab, proc);
+					proc->pid = 0;
+					proc->status = status;
+					if (proc->pipe[0] != -1) {
+						whileintr(write(proc->pipe[0], &proc, sizeof(proc)));
+						whileintr(close(proc->pipe[0]));
+					}
 				}
+				proc = next;
 			}
 		}
-	}
+	} while (any_changed);
 }
 
 
