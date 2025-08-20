@@ -23,34 +23,49 @@ static void *defallocf (void *ud, void *ptr, size_t osize, size_t nsize) {
 static volatile char initialized = 0;
 static losi_ProcTable proctab;
 static struct sigaction childact;
+static struct sigaction prev_childact;
 static sigset_t childmsk;
 
 
 #define whileintr(C)	while ((C) == -1 && errno == EINTR)
 
-static void childhandler (int signo)
+static void childhandler (int signo, siginfo_t *info, void *context)
 {
 	pid_t pid;
 	int status;
-	while (1) {
-		pid = waitpid(-1, &status, WNOHANG);
-		if (pid < 0) {
-			if (errno != EINTR) break;
-		} else if (pid == 0) {
-			break; /* process information not available anymore */
-		} else if (initialized) {
-			losi_Process *proc = losiP_findproctab(&proctab, pid);
-			if (proc) {
-				losiP_delproctab(&proctab, proc);
-				proc->pid = 0;
-				proc->status = status;
-				if (proc->pipe[0] != -1) {
-					whileintr(write(proc->pipe[0], &proc, sizeof(proc)));
-					whileintr(close(proc->pipe[0]));
+
+	int any_changed;
+	do {
+		if (!initialized)
+			break;
+
+		any_changed = 0;
+		for (size_t i = 0; i < proctab.capacity; ++i) {
+			losi_Process *proc = proctab.table[i];
+			while (proc) {
+				losi_Process *next = proc->next;
+				do {
+					pid = waitpid(proc->pid, &status, WNOHANG);
+				} while (pid < 0 && errno == EINTR);
+				if (pid > 0) {
+					any_changed = 1;
+					losiP_delproctab(&proctab, proc);
+					proc->pid = 0;
+					proc->status = status;
+					if (proc->pipe[0] != -1) {
+						whileintr(write(proc->pipe[0], &proc, sizeof(proc)));
+						whileintr(close(proc->pipe[0]));
+					}
 				}
+				proc = next;
 			}
 		}
-	}
+	} while (any_changed);
+
+	if (prev_childact.sa_flags & SA_SIGINFO)
+		prev_childact.sa_sigaction(signo, info, context);
+	else if (prev_childact.sa_handler != SIG_DFL && prev_childact.sa_handler != SIG_IGN)
+		prev_childact.sa_handler(signo);
 }
 
 
@@ -63,6 +78,7 @@ int losiP_initprocmgr (losi_Alloc allocf, void *allocud)
 		                             allocf ? allocud : NULL);
 		/* setup signal action */
 		childact.sa_handler = SIG_DFL;
+		childact.sa_sigaction = childhandler;
 		sigemptyset(&childact.sa_mask);
 		childact.sa_flags = 0;
 		/* setup signal block mask */
@@ -81,14 +97,18 @@ void losiP_lockprocmgr ()
 
 void losiP_unlockprocmgr ()
 {
-	void (*handler)(int);
-	if (losiP_emptyproctab(&proctab)) handler = SIG_DFL;
-	else handler = childhandler;
-	if (handler != childact.sa_handler) {
-		childact.sa_handler = handler;
-		sigaction(SIGCHLD, &childact, NULL);
-		if (handler == SIG_DFL) sigprocmask(SIG_UNBLOCK, &childmsk, NULL);
-	} else if (handler == childhandler) {
+	int use_prev = losiP_emptyproctab(&proctab);
+	int have_prev = childact.sa_flags == 0;
+	if (use_prev != have_prev) {
+		if (use_prev) {
+			childact.sa_flags = 0;
+			sigaction(SIGCHLD, &prev_childact, NULL);
+		} else {
+			childact.sa_flags = SA_SIGINFO;
+			sigaction(SIGCHLD, &childact, &prev_childact);
+		}
+		if (use_prev) sigprocmask(SIG_UNBLOCK, &childmsk, NULL);
+	} else if (!use_prev) {
 		sigprocmask(SIG_UNBLOCK, &childmsk, NULL);
 	}
 }
