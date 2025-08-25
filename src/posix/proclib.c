@@ -294,6 +294,7 @@ LOSIDRV_API losi_ErrorCode losiP_getprocexit (losi_ProcDriver *drv,
                                               losi_Process *proc,
                                               int *code)
 {
+	losiP_drainchildren();
 	if (proc->pid == 0) {
 		if (WIFEXITED(proc->status)) {
 			*code = WEXITSTATUS(proc->status);

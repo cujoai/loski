@@ -25,19 +25,31 @@ static losi_ProcTable proctab;
 static struct sigaction childact;
 static struct sigaction prev_childact;
 static sigset_t childmsk;
-static volatile sig_atomic_t handler_active = 0;
+static volatile sig_atomic_t children_ready = 0;
 
 
 #define whileintr(C)	while ((C) == -1 && errno == EINTR)
 
 static void childhandler (int signo, siginfo_t *info, void *context)
 {
-	if (!handler_active)
-		goto chain;
+	children_ready++;
 
+	if (prev_childact.sa_flags & SA_SIGINFO)
+		prev_childact.sa_sigaction(signo, info, context);
+	else if (prev_childact.sa_handler != SIG_DFL && prev_childact.sa_handler != SIG_IGN)
+		prev_childact.sa_handler(signo);
+}
+
+void losiP_drainchildren (void)
+{
 	pid_t pid;
 	int status;
 
+	sig_atomic_t expected_exits = children_ready;
+	if (expected_exits == 0) return;
+	children_ready = 0;
+
+	sig_atomic_t found_exits = 0;
 	int any_changed;
 	do {
 		if (!initialized)
@@ -53,6 +65,7 @@ static void childhandler (int signo, siginfo_t *info, void *context)
 				} while (pid < 0 && errno == EINTR);
 				if (pid > 0) {
 					any_changed = 1;
+					found_exits++;
 					losiP_delproctab(&proctab, proc);
 					proc->pid = 0;
 					proc->status = status;
@@ -60,17 +73,13 @@ static void childhandler (int signo, siginfo_t *info, void *context)
 						whileintr(write(proc->pipe[0], &proc, sizeof(proc)));
 						whileintr(close(proc->pipe[0]));
 					}
+					if (found_exits >= expected_exits)
+						return;
 				}
 				proc = next;
 			}
 		}
 	} while (any_changed);
-
-chain:
-	if (prev_childact.sa_flags & SA_SIGINFO)
-		prev_childact.sa_sigaction(signo, info, context);
-	else if (prev_childact.sa_handler != SIG_DFL && prev_childact.sa_handler != SIG_IGN)
-		prev_childact.sa_handler(signo);
 }
 
 
@@ -102,13 +111,14 @@ void losiP_freeprocmgr (void)
 
 void losiP_lockprocmgr ()
 {
+	losiP_drainchildren();
 	if (!losiP_emptyproctab(&proctab))
 		sigprocmask(SIG_BLOCK, &childmsk, NULL);
 }
 
 void losiP_unlockprocmgr ()
 {
-	handler_active = !losiP_emptyproctab(&proctab);
+	losiP_drainchildren();
 	sigprocmask(SIG_UNBLOCK, &childmsk, NULL);
 }
 
