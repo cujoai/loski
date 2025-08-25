@@ -25,12 +25,16 @@ static losi_ProcTable proctab;
 static struct sigaction childact;
 static struct sigaction prev_childact;
 static sigset_t childmsk;
+static volatile sig_atomic_t handler_active = 0;
 
 
 #define whileintr(C)	while ((C) == -1 && errno == EINTR)
 
 static void childhandler (int signo, siginfo_t *info, void *context)
 {
+	if (!handler_active)
+		goto chain;
+
 	pid_t pid;
 	int status;
 
@@ -62,6 +66,7 @@ static void childhandler (int signo, siginfo_t *info, void *context)
 		}
 	} while (any_changed);
 
+chain:
 	if (prev_childact.sa_flags & SA_SIGINFO)
 		prev_childact.sa_sigaction(signo, info, context);
 	else if (prev_childact.sa_handler != SIG_DFL && prev_childact.sa_handler != SIG_IGN)
@@ -77,10 +82,10 @@ int losiP_initprocmgr (losi_Alloc allocf, void *allocud)
 		losiP_initproctab(&proctab, allocf ? allocf : defallocf,
 		                             allocf ? allocud : NULL);
 		/* setup signal action */
-		childact.sa_handler = SIG_DFL;
 		childact.sa_sigaction = childhandler;
 		sigemptyset(&childact.sa_mask);
-		childact.sa_flags = SA_RESTART;
+		childact.sa_flags = SA_RESTART | SA_SIGINFO;
+		sigaction(SIGCHLD, &childact, &prev_childact);
 		/* setup signal block mask */
 		sigemptyset(&childmsk);
 		sigaddset(&childmsk, SIGCHLD);
@@ -103,20 +108,8 @@ void losiP_lockprocmgr ()
 
 void losiP_unlockprocmgr ()
 {
-	int use_prev = losiP_emptyproctab(&proctab);
-	int have_prev = childact.sa_flags == 0;
-	if (use_prev != have_prev) {
-		if (use_prev) {
-			childact.sa_flags = 0;
-			sigaction(SIGCHLD, &prev_childact, NULL);
-		} else {
-			childact.sa_flags = SA_SIGINFO;
-			sigaction(SIGCHLD, &childact, &prev_childact);
-		}
-		if (use_prev) sigprocmask(SIG_UNBLOCK, &childmsk, NULL);
-	} else if (!use_prev) {
-		sigprocmask(SIG_UNBLOCK, &childmsk, NULL);
-	}
+	handler_active = !losiP_emptyproctab(&proctab);
+	sigprocmask(SIG_UNBLOCK, &childmsk, NULL);
 }
 
 int losiP_incprocmgr ()
