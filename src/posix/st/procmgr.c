@@ -50,22 +50,26 @@ void losiP_drainchildren (void)
 	children_ready = 0;
 
 	sig_atomic_t found_exits = 0;
+	int still_running;
 	int any_changed;
 	do {
 		if (!initialized)
 			break;
 
 		any_changed = 0;
+		still_running = 0;
 		for (size_t i = 0; i < proctab.capacity; ++i) {
 			losi_Process *proc = proctab.table[i];
 			while (proc) {
 				losi_Process *next = proc->next;
+				still_running++;
 				do {
 					pid = waitpid(proc->pid, &status, WNOHANG);
 				} while (pid < 0 && errno == EINTR);
 				if (pid > 0) {
 					any_changed = 1;
 					found_exits++;
+					still_running--;
 					losiP_delproctab(&proctab, proc);
 					proc->pid = 0;
 					proc->status = status;
@@ -79,7 +83,7 @@ void losiP_drainchildren (void)
 				proc = next;
 			}
 		}
-	} while (any_changed);
+	} while (any_changed && still_running > 0);
 }
 
 
