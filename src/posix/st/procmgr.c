@@ -25,30 +25,51 @@ static losi_ProcTable proctab;
 static struct sigaction childact;
 static struct sigaction prev_childact;
 static sigset_t childmsk;
+static volatile sig_atomic_t children_ready = 0;
 
 
 #define whileintr(C)	while ((C) == -1 && errno == EINTR)
 
 static void childhandler (int signo, siginfo_t *info, void *context)
 {
+	children_ready++;
+
+	if (prev_childact.sa_flags & SA_SIGINFO)
+		prev_childact.sa_sigaction(signo, info, context);
+	else if (prev_childact.sa_handler != SIG_DFL && prev_childact.sa_handler != SIG_IGN)
+		prev_childact.sa_handler(signo);
+}
+
+void losiP_drainchildren (void)
+{
 	pid_t pid;
 	int status;
 
+	sig_atomic_t expected_exits = children_ready;
+	if (expected_exits == 0) return;
+	children_ready = 0;
+
+	sig_atomic_t found_exits = 0;
+	int still_running;
 	int any_changed;
 	do {
 		if (!initialized)
 			break;
 
 		any_changed = 0;
+		still_running = 0;
 		for (size_t i = 0; i < proctab.capacity; ++i) {
 			losi_Process *proc = proctab.table[i];
 			while (proc) {
 				losi_Process *next = proc->next;
+				still_running++;
 				do {
 					pid = waitpid(proc->pid, &status, WNOHANG);
 				} while (pid < 0 && errno == EINTR);
 				if (pid > 0) {
 					any_changed = 1;
+					found_exits++;
+					still_running--;
 					losiP_delproctab(&proctab, proc);
 					proc->pid = 0;
 					proc->status = status;
@@ -56,16 +77,13 @@ static void childhandler (int signo, siginfo_t *info, void *context)
 						whileintr(write(proc->pipe[0], &proc, sizeof(proc)));
 						whileintr(close(proc->pipe[0]));
 					}
+					if (found_exits >= expected_exits)
+						return;
 				}
 				proc = next;
 			}
 		}
-	} while (any_changed);
-
-	if (prev_childact.sa_flags & SA_SIGINFO)
-		prev_childact.sa_sigaction(signo, info, context);
-	else if (prev_childact.sa_handler != SIG_DFL && prev_childact.sa_handler != SIG_IGN)
-		prev_childact.sa_handler(signo);
+	} while (any_changed && still_running > 0);
 }
 
 
@@ -77,10 +95,10 @@ int losiP_initprocmgr (losi_Alloc allocf, void *allocud)
 		losiP_initproctab(&proctab, allocf ? allocf : defallocf,
 		                             allocf ? allocud : NULL);
 		/* setup signal action */
-		childact.sa_handler = SIG_DFL;
 		childact.sa_sigaction = childhandler;
 		sigemptyset(&childact.sa_mask);
-		childact.sa_flags = 0;
+		childact.sa_flags = SA_RESTART | SA_SIGINFO;
+		sigaction(SIGCHLD, &childact, &prev_childact);
 		/* setup signal block mask */
 		sigemptyset(&childmsk);
 		sigaddset(&childmsk, SIGCHLD);
@@ -89,28 +107,23 @@ int losiP_initprocmgr (losi_Alloc allocf, void *allocud)
 	return 0;
 }
 
+void losiP_freeprocmgr (void)
+{
+	if (initialized && proctab.table != proctab.mintab)
+		proctab.allocf(proctab.allocud, proctab.table, proctab.capacity * sizeof *proctab.table, 0);
+}
+
 void losiP_lockprocmgr ()
 {
+	losiP_drainchildren();
 	if (!losiP_emptyproctab(&proctab))
 		sigprocmask(SIG_BLOCK, &childmsk, NULL);
 }
 
 void losiP_unlockprocmgr ()
 {
-	int use_prev = losiP_emptyproctab(&proctab);
-	int have_prev = childact.sa_flags == 0;
-	if (use_prev != have_prev) {
-		if (use_prev) {
-			childact.sa_flags = 0;
-			sigaction(SIGCHLD, &prev_childact, NULL);
-		} else {
-			childact.sa_flags = SA_SIGINFO;
-			sigaction(SIGCHLD, &childact, &prev_childact);
-		}
-		if (use_prev) sigprocmask(SIG_UNBLOCK, &childmsk, NULL);
-	} else if (!use_prev) {
-		sigprocmask(SIG_UNBLOCK, &childmsk, NULL);
-	}
+	losiP_drainchildren();
+	sigprocmask(SIG_UNBLOCK, &childmsk, NULL);
 }
 
 int losiP_incprocmgr ()
