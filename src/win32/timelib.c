@@ -1,5 +1,5 @@
 /*
- * Code adapted from LuaSocket 2.0.2, originally written by Diego Nehab
+ * Code from LuaSocket 2.0.2, written by Diego Nehab
  *   http://w3.impa.br/~diego/software/luasocket/
  */
 
@@ -7,17 +7,7 @@
 
 #include <windows.h>
 
-int loski_opentime(loski_TimeDriver *drv)
-{
-	return 0;
-}
-
-int loski_closetime(loski_TimeDriver *drv)
-{
-	return 0;
-}
-
-lua_Number loski_now(loski_TimeDriver *drv)
+lua_Number losiT_now (losi_TimeDriver *drv)
 {
 	FILETIME ft;
 	double t;
@@ -28,7 +18,7 @@ lua_Number loski_now(loski_TimeDriver *drv)
 	return (t - 11644473600.0);
 }
 
-void loski_sleep(loski_TimeDriver *drv, lua_Number seconds)
+void losiT_wait (losi_TimeDriver *drv, lua_Number seconds)
 {
 	Sleep((int)(seconds*1000));
 }

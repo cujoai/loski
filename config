@@ -5,16 +5,22 @@ PLAT= none
 
 LUA_HOME= /usr/local
 LUA_INC= $(LUA_HOME)/include
-LUA_LIB= $(LUA_HOME)/lib
 LUA_BIN= $(LUA_HOME)/bin
-LUA_VER= 5.2
+LUA_VER= 5.3
+
+LUAMEM_HOME= $(LUA_HOME)
+LUAMEM_INC= $(LUAMEM_HOME)/include
+LUAMEM_LIB= $(LUAMEM_HOME)/lib
+
+LIB_NAME= luaosi
 
 TIM_M=	time.so
 PRC_M=	process.so
 NET_M=	network.so
 EVT_M=	event.so
-FLS_M=	filesys.so
-LIB_A=	libluaoski.a
+RTL_S=	lib$(LIB_NAME)rt.so
+LIB_S=	lib$(LIB_NAME).so
+LIB_A=	lib$(LIB_NAME).a
 
 # == END OF USER SETTINGS. NO NEED TO CHANGE ANYTHING BELOW THIS LINE =========
 
