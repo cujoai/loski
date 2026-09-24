@@ -5,6 +5,7 @@
 
 #include <errno.h>
 #include <signal.h>
+#include <stdint.h>
 #include <wait.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -29,6 +30,7 @@ static volatile sig_atomic_t children_ready = 0;
 
 
 #define whileintr(C)	while ((C) == -1 && errno == EINTR)
+#define ORPHANED	SIZE_MAX
 
 static void childhandler (int signo, siginfo_t *info, void *context)
 {
@@ -74,6 +76,8 @@ void losiP_drainchildren (void)
 						whileintr(write(proc->pipe[0], &proc, sizeof(proc)));
 						whileintr(close(proc->pipe[0]));
 					}
+					if (proc->piperefs == ORPHANED)
+						proctab.allocf(proctab.allocud, proc, sizeof *proc, 0);
 				}
 				proc = next;
 			}
@@ -104,7 +108,20 @@ int losiP_initprocmgr (losi_Alloc allocf, void *allocud)
 
 void losiP_freeprocmgr (void)
 {
-	if (initialized && proctab.table != proctab.mintab)
+	if (!initialized) return;
+	/* orphans are not subject to Lua GC so clean them out manually */
+	for (size_t i = 0; i < proctab.capacity; ++i) {
+		losi_Process *proc = proctab.table[i];
+		while (proc) {
+			losi_Process *next = proc->next;
+			if (proc->piperefs == ORPHANED) {
+				losiP_delproctab(&proctab, proc);
+				proctab.allocf(proctab.allocud, proc, sizeof *proc, 0);
+			}
+			proc = next;
+		}
+	}
+	if (proctab.table != proctab.mintab)
 		proctab.allocf(proctab.allocud, proctab.table, proctab.capacity * sizeof *proctab.table, 0);
 }
 
@@ -134,4 +151,19 @@ void losiP_putprocmgr (losi_Process *proc)
 void losiP_delprocmgr (losi_Process *proc)
 {
 	losiP_delproctab(&proctab, proc);
+}
+
+void losiP_adoptchild (losi_Process *proc)
+{
+	losi_Process *orphan;
+	losiP_delproctab(&proctab, proc);
+	orphan = proctab.allocf(proctab.allocud, NULL, 0, sizeof *orphan);
+	if (!orphan) return;  /* the process will be left as a zombie */
+	orphan->pid = proc->pid;
+	orphan->status = 0;
+	/* 'proc' keeps ownership of the pipe, which is freed with its handle */
+	orphan->pipe[0] = -1;
+	orphan->pipe[1] = -1;
+	orphan->piperefs = ORPHANED;
+	losiP_putproctab(&proctab, orphan);
 }
