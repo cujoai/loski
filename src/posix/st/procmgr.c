@@ -32,7 +32,7 @@ static volatile sig_atomic_t children_ready = 0;
 
 static void childhandler (int signo, siginfo_t *info, void *context)
 {
-	children_ready++;
+	children_ready = 1;
 
 	if (prev_childact.sa_flags & SA_SIGINFO)
 		prev_childact.sa_sigaction(signo, info, context);
@@ -45,11 +45,9 @@ void losiP_drainchildren (void)
 	pid_t pid;
 	int status;
 
-	sig_atomic_t expected_exits = children_ready;
-	if (expected_exits == 0) return;
+	if (!children_ready) return;
 	children_ready = 0;
 
-	sig_atomic_t found_exits = 0;
 	int still_running;
 	int any_changed;
 	do {
@@ -68,7 +66,6 @@ void losiP_drainchildren (void)
 				} while (pid < 0 && errno == EINTR);
 				if (pid > 0) {
 					any_changed = 1;
-					found_exits++;
 					still_running--;
 					losiP_delproctab(&proctab, proc);
 					proc->pid = 0;
@@ -77,8 +74,6 @@ void losiP_drainchildren (void)
 						whileintr(write(proc->pipe[0], &proc, sizeof(proc)));
 						whileintr(close(proc->pipe[0]));
 					}
-					if (found_exits >= expected_exits)
-						return;
 				}
 				proc = next;
 			}
