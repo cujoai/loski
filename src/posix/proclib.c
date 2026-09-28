@@ -326,7 +326,7 @@ LOSIDRV_API void losiP_freeproc (losi_ProcDriver *drv,
 {
 	losiP_lockprocmgr();
 	if (proc->pid != 0) {
-		losiP_delprocmgr(proc);
+		losiP_adoptchild(proc);
 		proc->pid = 0;
 	}
 	losiP_unlockprocmgr();

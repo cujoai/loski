@@ -18,6 +18,8 @@ void losiP_putprocmgr (losi_Process *proc);
 
 void losiP_delprocmgr (losi_Process *proc);
 
+void losiP_adoptchild (losi_Process *proc);
+
 void losiP_drainchildren (void);
 
 

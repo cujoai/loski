@@ -7,6 +7,7 @@ end
 
 runtest("process/status")
 runtest("process/create")
+runtest("process/zombies")
 runtest("network/address")
 runtest("network/resolve")
 runtest("network/getname")
